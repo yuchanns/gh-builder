@@ -1,0 +1,146 @@
+name: Actluna Benchmarks
+
+on:
+  repository_dispatch:
+    types: [trigger-actluna-benchmarks]
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          repository: yuchanns/actluna
+          token: ${{ secrets.ACCESS_TOKEN }}
+          submodules: recursive
+          ref: ${{ github.event.client_payload.ref }}
+
+      - name: Build actluna
+        id: build
+        uses: ./.github/actions/actluna
+
+      - name: Install wrk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk
+
+      - name: Run benchmarks
+        run: |
+          export ACTLUNA_ROUTERS=$(nproc)
+          ${{
+            steps.build.outputs.ACTLUNA_PATH
+          }} test/benchmark.lua &
+          sleep 2
+          wrk -t$(nproc) -c 100 -d30s --latency http://127.0.0.1:8080/bench/plaintext
+          killall actluna
+
+  bench-vs-go:
+    runs-on: ubuntu-latest
+    needs: bench
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          repository: yuchanns/actluna
+          token: ${{ secrets.ACCESS_TOKEN }}
+          submodules: recursive
+          ref: ${{ github.event.client_payload.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install wrk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk
+
+      - name: Build Go server
+        working-directory: ./.github/assets/benchgo
+        run: |
+          go build -o benchgo .
+
+      - name: Run benchmarks
+        working-directory: ./.github/assets/benchgo
+        run: |
+          ./benchgo &
+          sleep 2
+          wrk -t$(nproc) -c 100 -d30s --latency http://127.0.0.1:8080/bench/plaintext
+          killall benchgo
+
+  bench-vs-python:
+    runs-on: ubuntu-latest
+    needs: bench
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          repository: yuchanns/actluna
+          token: ${{ secrets.ACCESS_TOKEN }}
+          submodules: recursive
+          ref: ${{ github.event.client_payload.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install wrk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk
+
+      - name: Sync Python dependencies
+        working-directory: ./.github/assets/benchpy
+        run: |
+          uv sync
+      - name: Run benchmarks
+        working-directory: ./.github/assets/benchpy
+        run: |
+          uv run uvicorn main:app --workers $(nproc) --port 8080 --no-access-log --log-level critical --loop uvloop --http httptools &
+          sleep 2
+          wrk -t$(nproc) -c 100 -d30s --latency http://127.0.0.1:8080/bench/plaintext
+          killall uvicorn
+
+  bench-vs-openresty:
+    runs-on: ubuntu-latest
+    needs: bench
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          repository: yuchanns/actluna
+          token: ${{ secrets.ACCESS_TOKEN }}
+          submodules: recursive
+          ref: ${{ github.event.client_payload.ref }}
+
+      - name: Install OpenResty
+        uses: leafo/gh-actions-openresty@v2
+
+      - name: Install LuaRocks
+        uses: leafo/gh-actions-luarocks@master
+        with:
+          withLuaPath: "/usr/local/openresty/luajit/"
+
+      - name: Install wrk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wrk
+
+      - name: Install Lapis
+        run: |
+          luarocks install lapis
+
+      - name: Run benchmarks
+        working-directory: ./.github/assets/benchlapis
+        run: |
+          eval "$(luarocks path --bin)"
+          export LAPIS_WORKERS=$(nproc)
+          lapis server production &
+          sleep 2
+          wrk -t$(nproc) -c 100 -d30s --latency http://127.0.0.1:8080/bench/plaintext
+          lapis server stop || true
+          openresty -s quit || true
+
